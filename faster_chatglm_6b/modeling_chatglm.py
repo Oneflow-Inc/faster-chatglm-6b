@@ -196,116 +196,7 @@ def apply_rotary_pos_emb_index(q, k, cos, sin, position_id):
         F.embedding(position_id, sin.squeeze(1)).unsqueeze(2)
     q, k = (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
     return q, k
-
-
-def attention_fn(
-        self,
-        query_layer,
-        key_layer,
-        value_layer,
-        attention_mask,
-        hidden_size_per_partition,
-        layer_id,
-        layer_past=None,
-        scaling_attention_score=True,
-        use_cache=False,
-):
-    if layer_past is not None:
-        past_key, past_value = layer_past
-        key_layer = torch.cat((past_key, key_layer), dim=0)
-        value_layer = torch.cat((past_value, value_layer), dim=0)
-
-    # seqlen, batch, num_attention_heads, hidden_size_per_attention_head
-    seq_len, b, nh, hidden_size = key_layer.shape
-
-    if use_cache:
-        present = (key_layer, value_layer)
-    else:
-        present = None
-
-    query_key_layer_scaling_coeff = float(layer_id + 1)
-    if scaling_attention_score:
-        query_layer = query_layer / (math.sqrt(hidden_size) * query_key_layer_scaling_coeff)
-
-    # ===================================
-    # Raw attention scores. [b, np, s, s]
-    # ===================================
-
-    # [b, np, sq, sk]
-    output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
-
-    # [sq, b, np, hn] -> [sq, b * np, hn]
-    query_layer = query_layer.view(output_size[2], output_size[0] * output_size[1], -1)
-    # [sk, b, np, hn] -> [sk, b * np, hn]
-    key_layer = key_layer.view(output_size[3], output_size[0] * output_size[1], -1)
-
-    matmul_result = torch.empty(
-        output_size[0] * output_size[1],
-        output_size[2],
-        output_size[3],
-        dtype=query_layer.dtype,
-        device=query_layer.device,
-    )
-
-    matmul_result = torch.baddbmm(
-        matmul_result,
-        query_layer.transpose(0, 1),  # [b * np, sq, hn]
-        key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-        beta=0.0,
-        alpha=1.0,
-    )
-
-    # change view to [b, np, sq, sk]
-    attention_scores = matmul_result.view(*output_size)
-
-    if self.scale_mask_softmax:
-        self.scale_mask_softmax.scale = query_key_layer_scaling_coeff
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask.contiguous())
-    else:
-        if not (attention_mask == 0).all():
-            # if auto-regressive, skip
-            attention_scores.masked_fill_(attention_mask, -10000.0)
-        dtype = attention_scores.type()
-        attention_scores = attention_scores.float()
-        attention_scores = attention_scores * query_key_layer_scaling_coeff
-
-        attention_probs = F.softmax(attention_scores, dim=-1)
-
-        attention_probs = attention_probs.type(dtype)
-
-    # =========================
-    # Context layer. [sq, b, hp]
-    # =========================
-
-    # value_layer -> context layer.
-    # [sk, b, np, hn] --> [b, np, sq, hn]
-
-    # context layer shape: [b, np, sq, hn]
-    output_size = (value_layer.size(1), value_layer.size(2), query_layer.size(0), value_layer.size(3))
-
-    # change view [sk, b * np, hn]
-    value_layer = value_layer.view(value_layer.size(0), output_size[0] * output_size[1], -1)
-
-    # change view [b * np, sq, sk]
-    attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
-
-    # matmul: [b * np, sq, hn]
-    context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-
-    # change view [b, np, sq, hn]
-    context_layer = context_layer.view(*output_size)
-
-    # [b, np, sq, hn] --> [sq, b, np, hn]
-    context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
-
-    # [sq, b, np, hn] --> [sq, b, hp]
-    new_context_layer_shape = context_layer.size()[:-2] + (hidden_size_per_partition,)
-    context_layer = context_layer.view(*new_context_layer_shape)
-
-    outputs = (context_layer, present, attention_probs)
-
-    return outputs
-
+    
 
 class SelfAttention(torch.nn.Module):
     def __init__(self, hidden_size, num_attention_heads,
@@ -383,7 +274,7 @@ class SelfAttention(torch.nn.Module):
             self,
             hidden_states: torch.Tensor,
             position_ids,
-            attention_mask: torch.Tensor,
+            attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
@@ -391,7 +282,7 @@ class SelfAttention(torch.nn.Module):
     ):
         """
         hidden_states: [seq_len, batch, hidden_size]
-        attention_mask: [(1, 1), seq_len, seq_len]
+        attention_bias: [(1, 1), seq_len, seq_len]
         """
 
         # [seq_len, batch, 3 * hidden_size]
@@ -423,18 +314,35 @@ class SelfAttention(torch.nn.Module):
             # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
             query_layer, key_layer = apply_rotary_pos_emb_index(query_layer, key_layer, cos, sin, position_ids)
 
-        # [seq_len, batch, hidden_size]
-        context_layer, present, attention_probs = attention_fn(
-            self=self,
-            query_layer=query_layer,
-            key_layer=key_layer,
-            value_layer=value_layer,
-            attention_mask=attention_mask,
-            hidden_size_per_partition=self.hidden_size_per_partition,
-            layer_id=layer_id,
-            layer_past=layer_past,
-            use_cache=use_cache
+        
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key_layer, value_layer = torch._C.fused_attention_concat_past_key_value(
+                past_key=past_key, past_key_layout="MBHK",
+                past_value=past_value, past_value_layout="MBHK",
+                key=key_layer, key_layout="MBHK",
+                value=value_layer, value_layout="MBHK"
+            )
+
+        # seqlen, batch, num_attention_heads, hidden_size_per_attention_head
+        seq_len, b, nh, hidden_size = key_layer.shape
+
+        if use_cache:
+            present = (key_layer, value_layer)
+        else:
+            present = None
+
+        context_layer = torch._C.fused_multi_head_attention_inference_v2(
+            query = query_layer, query_layout = "MBHK",
+            key = key_layer, key_layout = "MBHK",
+            value = value_layer, value_layout = "MBHK",
+            causal = False,
+            scale = 1 / math.sqrt(hidden_size),
+            attn_bias = attention_bias,
+            output_layout = "MB(HK)",
         )
+        
+        attention_probs = None # set attention_probs to None when use fmha
 
         output = self.dense(context_layer)
 
@@ -554,7 +462,7 @@ class GLMBlock(torch.nn.Module):
             self,
             hidden_states: torch.Tensor,
             position_ids,
-            attention_mask: torch.Tensor,
+            attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
@@ -562,7 +470,7 @@ class GLMBlock(torch.nn.Module):
     ):
         """
         hidden_states: [seq_len, batch, hidden_size]
-        attention_mask: [(1, 1), seq_len, seq_len]
+        attention_bias: [(1, 1), seq_len, seq_len]
         """
 
         # Layer norm at the begining of the transformer layer.
@@ -573,7 +481,7 @@ class GLMBlock(torch.nn.Module):
         attention_outputs = self.attention(
             attention_input,
             position_ids,
-            attention_mask=attention_mask,
+            attention_bias=attention_bias,
             layer_id=layer_id,
             layer_past=layer_past,
             use_cache=use_cache,
@@ -861,10 +769,13 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             past_key_values_length = past_key_values[0][0].shape[0]
             seq_length_with_past = seq_length_with_past + past_key_values_length
         if attention_mask is None:
-            attention_mask = torch.zeros(1, 1, device=input_ids.device).bool()
-
+            attention_bias = None
         else:
-            attention_mask = attention_mask.to(input_ids.device)
+            attention_bias = attention_mask * (-10000.)
+            pad = attention_bias.shape[-1] % 8
+            if pad > 0:
+                attention_bias = nn.functional.pad(attention_bias, (0, 8 - pad))
+            attention_bias = attention_bias.to(input_ids.device).to(self.params_dtype)
 
         for i, layer in enumerate(self.layers):
 
@@ -874,7 +785,7 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             layer_ret = layer(
                 hidden_states,
                 position_ids=position_ids,
-                attention_mask=attention_mask,
+                attention_bias=attention_bias,
                 layer_id=torch.tensor(i),
                 layer_past=past_key_values[i],
                 use_cache=use_cache,

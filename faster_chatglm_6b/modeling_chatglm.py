@@ -274,7 +274,6 @@ class SelfAttention(torch.nn.Module):
             self,
             hidden_states: torch.Tensor,
             position_ids,
-            attention_mask: torch.Tensor,
             attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
@@ -283,7 +282,7 @@ class SelfAttention(torch.nn.Module):
     ):
         """
         hidden_states: [seq_len, batch, hidden_size]
-        attention_mask: [(1, 1), seq_len, seq_len]
+        attention_bias: [(1, 1), seq_len, seq_len]
         """
 
         # [seq_len, batch, 3 * hidden_size]
@@ -463,7 +462,6 @@ class GLMBlock(torch.nn.Module):
             self,
             hidden_states: torch.Tensor,
             position_ids,
-            attention_mask: torch.Tensor,
             attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
@@ -472,7 +470,7 @@ class GLMBlock(torch.nn.Module):
     ):
         """
         hidden_states: [seq_len, batch, hidden_size]
-        attention_mask: [(1, 1), seq_len, seq_len]
+        attention_bias: [(1, 1), seq_len, seq_len]
         """
 
         # Layer norm at the begining of the transformer layer.
@@ -483,7 +481,6 @@ class GLMBlock(torch.nn.Module):
         attention_outputs = self.attention(
             attention_input,
             position_ids,
-            attention_mask=attention_mask,
             attention_bias=attention_bias,
             layer_id=layer_id,
             layer_past=layer_past,
@@ -772,13 +769,12 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             past_key_values_length = past_key_values[0][0].shape[0]
             seq_length_with_past = seq_length_with_past + past_key_values_length
         if attention_mask is None:
-            # attention_mask = torch.zeros(1, 1, device=input_ids.device).bool()
             attention_bias = None
         else:
             attention_bias = attention_mask * (-10000.)
             pad = attention_bias.shape[-1] % 8
             if pad > 0:
-                attention_bias = nn.functional.pad(attention_bias, (0, 8 - pad, 0, 8 - pad))
+                attention_bias = nn.functional.pad(attention_bias, (0, 8 - pad))
             attention_bias = attention_bias.to(input_ids.device).to(self.params_dtype)
 
         for i, layer in enumerate(self.layers):
@@ -789,7 +785,6 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             layer_ret = layer(
                 hidden_states,
                 position_ids=position_ids,
-                attention_mask = None,
                 attention_bias=attention_bias,
                 layer_id=torch.tensor(i),
                 layer_past=past_key_values[i],

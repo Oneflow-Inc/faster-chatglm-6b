@@ -227,14 +227,9 @@ def attention_fn(
     else:
         present = None
 
-    attn_bias = None
-    if not (attention_mask == 0).all():
+    if (attention_mask == 0).all():
         # if auto-regressive, skip
-        # attention_scores.masked_fill_(attention_mask, -10000.0)
-        attn_bias = attention_mask * (-10000.)
-        pad = seq_len % 8
-        if pad > 0:
-            attn_bias = nn.functional.pad(attn_bias, (0, 8 - pad, 0, 8 - pad)).to(query_layer.dtype)
+        attention_mask = None
 
     context_layer = torch._C.fused_multi_head_attention_inference_v2(
         query = query_layer, query_layout = "MBHK",
@@ -242,7 +237,7 @@ def attention_fn(
         value = value_layer, value_layout = "MBHK",
         causal = False,
         scale = 1 / math.sqrt(hidden_size),
-        attn_bias = attn_bias,
+        attn_bias = attention_mask,
         output_layout = "MB(HK)",
     )
 
@@ -807,7 +802,11 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             attention_mask = torch.zeros(1, 1, device=input_ids.device).bool()
 
         else:
-            attention_mask = attention_mask.to(input_ids.device)
+            attention_mask = attention_mask * (-10000.)
+            pad = attention_mask.shape[-1] % 8
+            if pad > 0:
+                attention_mask = nn.functional.pad(attention_mask, (0, 8 - pad, 0, 8 - pad))
+            attention_mask = attention_mask.to(input_ids.device).half() # to(query.dtype)
 
         for i, layer in enumerate(self.layers):
 

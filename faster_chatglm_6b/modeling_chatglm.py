@@ -196,54 +196,7 @@ def apply_rotary_pos_emb_index(q, k, cos, sin, position_id):
         F.embedding(position_id, sin.squeeze(1)).unsqueeze(2)
     q, k = (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
     return q, k
-
-
-def attention_fn(
-        self,
-        query_layer,
-        key_layer,
-        value_layer,
-        attention_mask,
-        hidden_size_per_partition,
-        layer_id,
-        layer_past=None,
-        scaling_attention_score=True,
-        use_cache=False,
-):
-    if layer_past is not None:
-        past_key, past_value = layer_past
-        key_layer, value_layer = torch._C.fused_attention_concat_past_key_value(
-            past_key=past_key, past_key_layout="MBHK",
-            past_value=past_value, past_value_layout="MBHK",
-            key=key_layer, key_layout="MBHK",
-            value=value_layer, value_layout="MBHK"
-        )
-
-    # seqlen, batch, num_attention_heads, hidden_size_per_attention_head
-    seq_len, b, nh, hidden_size = key_layer.shape
-
-    if use_cache:
-        present = (key_layer, value_layer)
-    else:
-        present = None
-
-    if (attention_mask == 0).all():
-        # if auto-regressive, skip
-        attention_mask = None
-
-    context_layer = torch._C.fused_multi_head_attention_inference_v2(
-        query = query_layer, query_layout = "MBHK",
-        key = key_layer, key_layout = "MBHK",
-        value = value_layer, value_layout = "MBHK",
-        causal = False,
-        scale = 1 / math.sqrt(hidden_size),
-        attn_bias = attention_mask,
-        output_layout = "MB(HK)",
-    )
-
-    outputs = (context_layer, present, None) # set attention_probs to None
-
-    return outputs
+    
 
 class SelfAttention(torch.nn.Module):
     def __init__(self, hidden_size, num_attention_heads,
@@ -322,6 +275,7 @@ class SelfAttention(torch.nn.Module):
             hidden_states: torch.Tensor,
             position_ids,
             attention_mask: torch.Tensor,
+            attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
@@ -361,18 +315,35 @@ class SelfAttention(torch.nn.Module):
             # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
             query_layer, key_layer = apply_rotary_pos_emb_index(query_layer, key_layer, cos, sin, position_ids)
 
-        # [seq_len, batch, hidden_size]
-        context_layer, present, attention_probs = attention_fn(
-            self=self,
-            query_layer=query_layer,
-            key_layer=key_layer,
-            value_layer=value_layer,
-            attention_mask=attention_mask,
-            hidden_size_per_partition=self.hidden_size_per_partition,
-            layer_id=layer_id,
-            layer_past=layer_past,
-            use_cache=use_cache
+        
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key_layer, value_layer = torch._C.fused_attention_concat_past_key_value(
+                past_key=past_key, past_key_layout="MBHK",
+                past_value=past_value, past_value_layout="MBHK",
+                key=key_layer, key_layout="MBHK",
+                value=value_layer, value_layout="MBHK"
+            )
+
+        # seqlen, batch, num_attention_heads, hidden_size_per_attention_head
+        seq_len, b, nh, hidden_size = key_layer.shape
+
+        if use_cache:
+            present = (key_layer, value_layer)
+        else:
+            present = None
+
+        context_layer = torch._C.fused_multi_head_attention_inference_v2(
+            query = query_layer, query_layout = "MBHK",
+            key = key_layer, key_layout = "MBHK",
+            value = value_layer, value_layout = "MBHK",
+            causal = False,
+            scale = 1 / math.sqrt(hidden_size),
+            attn_bias = attention_bias,
+            output_layout = "MB(HK)",
         )
+        
+        attention_probs = None # set attention_probs to None when use fmha
 
         output = self.dense(context_layer)
 
@@ -493,6 +464,7 @@ class GLMBlock(torch.nn.Module):
             hidden_states: torch.Tensor,
             position_ids,
             attention_mask: torch.Tensor,
+            attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
@@ -512,6 +484,7 @@ class GLMBlock(torch.nn.Module):
             attention_input,
             position_ids,
             attention_mask=attention_mask,
+            attention_bias=attention_bias,
             layer_id=layer_id,
             layer_past=layer_past,
             use_cache=use_cache,
@@ -799,14 +772,14 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             past_key_values_length = past_key_values[0][0].shape[0]
             seq_length_with_past = seq_length_with_past + past_key_values_length
         if attention_mask is None:
-            attention_mask = torch.zeros(1, 1, device=input_ids.device).bool()
-
+            # attention_mask = torch.zeros(1, 1, device=input_ids.device).bool()
+            attention_bias = None
         else:
-            attention_mask = attention_mask * (-10000.)
-            pad = attention_mask.shape[-1] % 8
+            attention_bias = attention_mask * (-10000.)
+            pad = attention_bias.shape[-1] % 8
             if pad > 0:
-                attention_mask = nn.functional.pad(attention_mask, (0, 8 - pad, 0, 8 - pad))
-            attention_mask = attention_mask.to(input_ids.device).half() # to(query.dtype)
+                attention_bias = nn.functional.pad(attention_bias, (0, 8 - pad, 0, 8 - pad))
+            attention_bias = attention_bias.to(input_ids.device).to(self.params_dtype)
 
         for i, layer in enumerate(self.layers):
 
@@ -816,7 +789,8 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             layer_ret = layer(
                 hidden_states,
                 position_ids=position_ids,
-                attention_mask=attention_mask,
+                attention_mask = None,
+                attention_bias=attention_bias,
                 layer_id=torch.tensor(i),
                 layer_past=past_key_values[i],
                 use_cache=use_cache,

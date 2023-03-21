@@ -1,4 +1,0 @@
-icetk
-transformers==4.27.1
-protobuf==3.20.0
-torch==1.13.1

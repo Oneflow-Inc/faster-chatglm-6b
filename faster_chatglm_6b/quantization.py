@@ -136,7 +136,8 @@ class QuantizedLinear(Linear):
     def forward(self, input):
         output = torch._C.fused_linear_with_groupwise_quantized_weight(
             input, self.weight, self.weight_scale, w_zero=None,
-            b=self.bias, num_bits=self.weight_bit_width, symmetric=True
+            b=self.bias, num_bits=self.weight_bit_width, symmetric=True,
+            group_dim=-1, group_size=self.weight.shape[-1]
         )
         return output
 

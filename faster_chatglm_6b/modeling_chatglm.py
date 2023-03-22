@@ -361,7 +361,7 @@ class GEGLU(torch.nn.Module):
     def forward(self, x):
         # dim=-1 breaks in jit for pt<1.10
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
-        return x1 * self.activation_fn(x2)
+        return torch._C.fused_fast_gelu_mul(x2, x1)
 
 
 class GLU(torch.nn.Module):

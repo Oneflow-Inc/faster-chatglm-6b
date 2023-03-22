@@ -1,3 +1,4 @@
+# This code is base on https://huggingface.co/THUDM/chatglm-6b/blob/main/quantization.py
 from torch.nn import Linear
 from torch.nn.parameter import Parameter
 

@@ -1,3 +1,4 @@
+# This code is base on https://huggingface.co/THUDM/chatglm-6b/blob/main/modeling_chatglm.py
 """ PyTorch ChatGLM model. """
 
 import math

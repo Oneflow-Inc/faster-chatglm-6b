@@ -138,7 +138,7 @@ def gelu_impl(x):
 
 
 def gelu(x):
-    return gelu_impl(x)
+    return torch._C.fast_gelu(x)
 
 
 class RotaryEmbedding(torch.nn.Module):
@@ -393,7 +393,7 @@ class GLU(torch.nn.Module):
             dtype=params_dtype,
         )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, skip, skip_scale):
         """
         hidden_states: [seq_len, batch, hidden_size]
         """
@@ -403,7 +403,17 @@ class GLU(torch.nn.Module):
 
         intermediate_parallel = self.activation_func(intermediate_parallel)
 
-        output = self.dense_4h_to_h(intermediate_parallel)
+        if self.dense_4h_to_h.weight.dtype == torch.float16:
+            return torch._C.fused_matmul_bias(
+                    x=intermediate_parallel,
+                    weight=self.dense_4h_to_h.weight,
+                    bias=self.dense_4h_to_h.bias,
+                    _add_to_output=skip,
+                    beta=skip_scale,
+                    )
+        else:
+            output = self.dense_4h_to_h(intermediate_parallel)
+            output = skip * skip_scale + output
 
         return output
 
@@ -504,11 +514,7 @@ class GLMBlock(torch.nn.Module):
                 epsilon=self.post_attention_layernorm.eps,
                 )
 
-        # MLP.
-        mlp_output = self.mlp(mlp_input)
-
-        # Second residual connection.
-        output = mlp_input * alpha + mlp_output
+        output = self.mlp(mlp_input, skip=mlp_input, skip_scale=alpha)
 
         if use_cache:
             outputs = (output,) + outputs

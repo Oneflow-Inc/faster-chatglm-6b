@@ -1,4 +1,4 @@
-+# This code is base on https://huggingface.co/THUDM/chatglm-6b/blob/main/configuration_chatglm.py
+# This code is base on https://huggingface.co/THUDM/chatglm-6b/blob/main/configuration_chatglm.py
 """ ChatGLM model configuration """
 
 from transformers.configuration_utils import PretrainedConfig

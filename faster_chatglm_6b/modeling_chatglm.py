@@ -336,7 +336,6 @@ class SelfAttention(torch.nn.Module):
             query = query_layer, query_layout = "MBHK",
             key = key_layer, key_layout = "MBHK",
             value = value_layer, value_layout = "MBHK",
-            causal = False,
             scale = 1 / math.sqrt(hidden_size),
             attn_bias = attention_bias,
             output_layout = "MB(HK)",
@@ -494,9 +493,15 @@ class GLMBlock(torch.nn.Module):
 
         # Residual connection.
         alpha = (2 * self.num_layers) ** 0.5
-        hidden_states = attention_input * alpha + attention_output
 
-        mlp_input = self.post_attention_layernorm(hidden_states)
+        mlp_input = torch._C.skip_layer_norm(
+                x=attention_output,
+                gamma=self.post_attention_layernorm.weight,
+                beta=self.post_attention_layernorm.bias,
+                skip=attention_input,
+                alpha=alpha,
+                epsilon=self.post_attention_layernorm.eps,
+                )
 
         # MLP.
         mlp_output = self.mlp(mlp_input)

@@ -1,187 +1,346 @@
-from torch.nn import Linear
-from torch.nn.parameter import Parameter
+"""Tokenization classes for ChatGLM."""
+import sys
+import unicodedata
+from typing import List, Optional, Union
+from functools import lru_cache
+import os
+import collections
+import re
 
-import bz2
-import torch
-import base64
-import ctypes
+from transformers.tokenization_utils import PreTrainedTokenizer
+from icetk.text_tokenizer import TextTokenizer
+from icetk.utils import auto_create
+import icetk.sentencepiece_model_pb2 as sp_model
+from transformers.utils import logging
 
-from typing import List
-from cpm_kernels.kernels.base import LazyKernelCModule, KernelFunction, round_up
+logger = logging.get_logger(__name__)
+
+PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
+    "THUDM/chatglm-6b": 2048,
+}
 
 
-class W8A16Linear(torch.autograd.Function):
+class SPTokenizer:
+    def __init__(
+        self,
+        vocab_file,
+        max_blank_length=80,
+        byte_fallback=True,
+    ):
+        assert vocab_file is not None
+        self.vocab_file = vocab_file
+        self.special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "<unused_0>", "<sop>", "<eop>", "<ENC>", "<dBLOCK>"]
+        self.max_blank_length = max_blank_length
+        self.byte_fallback = byte_fallback
+        self.text_tokenizer = self._build_text_tokenizer(encode_special_tokens=False)
+        self.special_text_tokenizer = self._build_text_tokenizer(encode_special_tokens=True)
+
     @staticmethod
-    def forward(ctx, inp: torch.Tensor, quant_w: torch.Tensor, scale_w: torch.Tensor, weight_bit_width):
-        ctx.inp_shape = inp.size()
-        ctx.weight_shape = quant_w.size()
-        ctx.weight_bit_width = weight_bit_width
-        out_features = quant_w.size(0)
-        inp = inp.contiguous().view(-1, inp.size(-1))
-        weight = extract_weight_to_half(quant_w, scale_w, weight_bit_width)
-        output = inp.mm(weight.t())
-        ctx.save_for_backward(inp, quant_w, scale_w)
-        return output.view(*(ctx.inp_shape[:-1] + (out_features,)))
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        inp, quant_w, scale_w = ctx.saved_tensors
-        weight = extract_weight_to_half(quant_w, scale_w, ctx.weight_bit_width)
-        grad_output = grad_output.contiguous().view(-1, weight.size(0))
-        grad_input = grad_output.mm(weight)
-        grad_weight = grad_output.t().mm(inp)
-        return grad_input.view(ctx.inp_shape), grad_weight.view(ctx.weight_shape), None
-
-
-class Kernel:
-    def __init__(self, code: bytes, function_names: List[str]):
-        self.code = code
-        self._function_names = function_names
-        self._cmodule = LazyKernelCModule(self.code)
-
-        for name in self._function_names:
-            setattr(self, name, KernelFunction(self._cmodule, name))
-
-
-quantization_code = "$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"
-
-kernels = Kernel(
-    bz2.decompress(base64.b64decode(quantization_code)),
-    [
-        "int4WeightCompression",
-        "int4WeightExtractionFloat",
-        "int4WeightExtractionHalf",
-        "int8WeightExtractionFloat",
-        "int8WeightExtractionHalf",
-    ],
-)
-
-
-def compress_int4_weight(weight: torch.Tensor):  # (n, m)
-    with torch.cuda.device(weight.device):
-        n, m = weight.size(0), weight.size(1)
-        assert m % 2 == 0
-        m = m // 2
-        out = torch.empty(n, m, dtype=torch.int8, device="cuda")
-        stream = torch.cuda.current_stream()
-
-        gridDim = (n, 1, 1)
-        blockDim = (min(round_up(m, 32), 1024), 1, 1)
-
-        kernels.int4WeightCompression(
-            gridDim,
-            blockDim,
-            0,
-            stream,
-            [ctypes.c_void_p(weight.data_ptr()), ctypes.c_void_p(out.data_ptr()), ctypes.c_int32(n), ctypes.c_int32(m)],
-        )
-        return out
-
-
-def extract_weight_to_half(weight: torch.Tensor, scale_list: torch.Tensor, source_bit_width: int):
-    if source_bit_width == 8:
-        func = kernels.int8WeightExtractionHalf
-    elif source_bit_width == 4:
-        func = kernels.int4WeightExtractionHalf
-    else:
-        assert False, "Unsupported bit-width"
-
-    with torch.cuda.device(weight.device):
-        n, m = weight.size(0), weight.size(1)
-        out = torch.empty(n, m * (8 // source_bit_width), dtype=torch.half, device="cuda")
-        stream = torch.cuda.current_stream()
-
-        gridDim = (n, 1, 1)
-        blockDim = (min(round_up(m, 32), 1024), 1, 1)
-
-        func(
-            gridDim,
-            blockDim,
-            0,
-            stream,
-            [
-                ctypes.c_void_p(weight.data_ptr()),
-                ctypes.c_void_p(scale_list.data_ptr()),
-                ctypes.c_void_p(out.data_ptr()),
-                ctypes.c_int32(n),
-                ctypes.c_int32(m),
-            ],
-        )
-        return out
-
-
-class QuantizedLinear(Linear):
-    def __init__(self, weight_bit_width: int, weight_tensor=None, bias_tensor=None, *args, **kwargs):
-        super(QuantizedLinear, self).__init__(*args, **kwargs)
-        self.weight_bit_width = weight_bit_width
-
-        shape = self.weight.shape
-        del self.weight
-
-        if weight_tensor is None:
-            self.weight = torch.empty(
-                shape[0], shape[1] * weight_bit_width // 8, dtype=torch.int8, device=kwargs["device"]
+    def _configure_tokenizer(
+        text_tokenizer: TextTokenizer,
+        special_tokens: List[str],
+        max_blank_length: int,
+        byte_fallback: bool,
+        encode_special_tokens=False,
+    ):
+        # special token
+        special_token_type = 4 if encode_special_tokens else 3  # 3 - CONTROL, 4 - USER_DEFINE
+        for token in special_tokens:
+            text_tokenizer.proto.pieces.append(
+                sp_model.ModelProto.SentencePiece(piece=token, score=0.0, type=special_token_type)
             )
-            self.weight_scale = torch.empty(shape[0], dtype=kwargs["params_dtype"], device=kwargs["device"])
+        # whitespaces
+        for token in [SPTokenizer.get_tab_token()] + [
+            SPTokenizer.get_blank_token(i) for i in range(2, max_blank_length + 1)
+        ]:
+            text_tokenizer.proto.pieces.append(sp_model.ModelProto.SentencePiece(piece=token, score=0.0, type=4))
+        # byte fallback
+        if byte_fallback:
+            text_tokenizer.proto.trainer_spec.byte_fallback = True
+            for i in range(256):
+                text_tokenizer.proto.pieces.append(
+                    sp_model.ModelProto.SentencePiece(piece="<0x{:02X}>".format(i), score=0.0, type=6)
+                )
+        text_tokenizer.refresh()
+
+    def _build_text_tokenizer(self, encode_special_tokens=False):
+        tokenizer = TextTokenizer(self.vocab_file)
+        self._configure_tokenizer(
+            tokenizer, self.special_tokens, self.max_blank_length, self.byte_fallback, encode_special_tokens
+        )
+        return tokenizer
+
+    def _get_text_tokenizer(self, encode_special_tokens=False):
+        if encode_special_tokens:
+            return self.special_text_tokenizer
         else:
-            self.weight_scale = (weight_tensor.abs().max(dim=-1).values / ((2 ** (weight_bit_width - 1)) - 1)).half()
-            self.weight = torch.round(weight_tensor / self.weight_scale[:, None]).to(torch.int8)
-            if weight_bit_width == 4:
-                self.weight = compress_int4_weight(self.weight)
+            return self.text_tokenizer
 
-        self.weight = Parameter(self.weight.to(kwargs["device"]), requires_grad=False)
-        self.weight_scale = Parameter(self.weight_scale.to(kwargs["device"]), requires_grad=False)
-        self.bias = Parameter(bias_tensor.to(kwargs["device"]), requires_grad=False)
+    @staticmethod
+    def get_blank_token(length: int):
+        assert length >= 2
+        return f"<|blank_{length}|>"
 
-    def forward(self, input):
-        output = W8A16Linear.apply(input, self.weight, self.weight_scale, self.weight_bit_width)
-        if self.bias is not None:
-            output = output + self.bias
-        return output
+    @staticmethod
+    def get_tab_token():
+        return f"<|tab|>"
+
+    @property
+    def num_image_tokens(self):
+        return 20000
+
+    @property
+    def num_text_tokens(self):
+        return self.text_tokenizer.num_tokens
+
+    @property
+    def num_tokens(self):
+        return self.num_image_tokens + self.num_text_tokens
+
+    @staticmethod
+    def _encode_whitespaces(text: str, max_len: int = 80):
+        text = text.replace("\t", SPTokenizer.get_tab_token())
+        for i in range(max_len, 1, -1):
+            text = text.replace(" " * i, SPTokenizer.get_blank_token(i))
+        return text
+
+    def _preprocess(self, text: str, linebreak=True, whitespaces=True):
+        if linebreak:
+            text = text.replace("\n", "<n>")
+        if whitespaces:
+            text = self._encode_whitespaces(text, max_len=self.max_blank_length)
+        return text
+
+    def encode(
+        self, text: str, linebreak=True, whitespaces=True, special_tokens=False, add_dummy_prefix=True
+    ) -> List[int]:
+        """
+        @param text: Text to encode.
+        @param linebreak: Whether to encode newline (\n) in text.
+        @param whitespaces: Whether to encode multiple whitespaces or tab in text, useful for source code encoding.
+        @param special_tokens: Whether to encode special token ([MASK], [gMASK], etc.) in text.
+        @param add_dummy_prefix: Whether to add dummy blank space in the beginning.
+        """
+        text = self._preprocess(text, linebreak, whitespaces)
+        if not add_dummy_prefix:
+            text = "<n>" + text
+        tmp = self._get_text_tokenizer(encode_special_tokens=special_tokens).encode(text)
+        tokens = [x + self.num_image_tokens for x in tmp]
+        return tokens if add_dummy_prefix else tokens[2:]
+
+    def decode(self, text_ids: List[int], special_tokens=False) -> str:
+        ids = [int(_id) - self.num_image_tokens for _id in text_ids]
+        ids = [_id for _id in ids if _id >= 0]
+        text = self._get_text_tokenizer(encode_special_tokens=special_tokens).decode(ids)
+        text = text.replace("<n>", "\n")
+        text = text.replace(SPTokenizer.get_tab_token(), "\t")
+        for i in range(2, self.max_blank_length + 1):
+            text = text.replace(self.get_blank_token(i), " " * i)
+        return text
+
+    def tokenize(
+        self, text: str, linebreak=True, whitespaces=True, special_tokens=False, add_dummy_prefix=True
+    ) -> List[str]:
+        """
+        @param text: Text to encode.
+        @param linebreak: Whether to encode newline (\n) in text.
+        @param whitespaces: Whether to encode multiple whitespaces or tab in text, useful for source code encoding.
+        @param special_tokens: Whether to encode special token ([MASK], [gMASK], etc.) in text.
+        @param add_dummy_prefix: Whether to add dummy blank space in the beginning.
+        """
+        text = self._preprocess(text, linebreak, whitespaces)
+        if not add_dummy_prefix:
+            text = "<n>" + text
+        tokens = self._get_text_tokenizer(encode_special_tokens=special_tokens).tokenize(text)
+        return tokens if add_dummy_prefix else tokens[2:]
+
+    def __getitem__(self, x: Union[int, str]):
+        if isinstance(x, int):
+            if x < self.num_image_tokens:
+                return "<image_{}>".format(x)
+            else:
+                return self.text_tokenizer.convert_id_to_token(x - self.num_image_tokens)
+        elif isinstance(x, str):
+            if x.startswith("<image_") and x.endswith(">") and x[7:-1].isdigit():
+                return int(x[7:-1])
+            else:
+                return self.text_tokenizer.convert_token_to_id(x) + self.num_image_tokens
+        else:
+            raise ValueError("The key should be str or int.")
 
 
-def quantize(model, weight_bit_width):
-    """Replace fp16 linear with quantized linear"""
+class ChatGLMTokenizer(PreTrainedTokenizer):
+    """
+    Construct a ChatGLM tokenizer. Based on byte-level Byte-Pair-Encoding.
 
-    for layer in model.layers:
-        layer.attention.query_key_value = QuantizedLinear(
-            weight_bit_width=weight_bit_width,
-            weight_tensor=layer.attention.query_key_value.weight.to(torch.cuda.current_device()),
-            bias_tensor=layer.attention.query_key_value.bias,
-            in_features=layer.attention.query_key_value.in_features,
-            out_features=layer.attention.query_key_value.out_features,
-            bias=True,
-            dtype=torch.half,
-            device=layer.attention.query_key_value.weight.device,
+    Args:
+        vocab_file (`str`):
+            Path to the vocabulary file.
+    """
+
+    vocab_files_names = {"vocab_file": "ice_text.model"}
+    max_model_input_sizes = PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES
+    model_input_names = ["input_ids"]
+
+    def __init__(
+            self,
+            vocab_file,
+            do_lower_case=False,
+            remove_space=False,
+            bos_token='sop',
+            eos_token='eos',
+            eop_token='eop',
+            mask_token='[MASK]',
+            gmask_token='[gMASK]',
+            padding_side="left",
+            **kwargs
+    ) -> None:
+        super().__init__(
+            do_lower_case=do_lower_case,
+            remove_space=remove_space,
+            padding_side=padding_side,
+            **kwargs
         )
-        layer.attention.dense = QuantizedLinear(
-            weight_bit_width=weight_bit_width,
-            weight_tensor=layer.attention.dense.weight.to(torch.cuda.current_device()),
-            bias_tensor=layer.attention.dense.bias,
-            in_features=layer.attention.dense.in_features,
-            out_features=layer.attention.dense.out_features,
-            bias=True,
-            dtype=torch.half,
-            device=layer.attention.dense.weight.device,
-        )
-        layer.mlp.dense_h_to_4h = QuantizedLinear(
-            weight_bit_width=weight_bit_width,
-            weight_tensor=layer.mlp.dense_h_to_4h.weight.to(torch.cuda.current_device()),
-            bias_tensor=layer.mlp.dense_h_to_4h.bias,
-            in_features=layer.mlp.dense_h_to_4h.in_features,
-            out_features=layer.mlp.dense_h_to_4h.out_features,
-            bias=True,
-            dtype=torch.half,
-            device=layer.mlp.dense_h_to_4h.weight.device,
-        )
-        layer.mlp.dense_4h_to_h = QuantizedLinear(
-            weight_bit_width=weight_bit_width,
-            weight_tensor=layer.mlp.dense_4h_to_h.weight.to(torch.cuda.current_device()),
-            bias_tensor=layer.mlp.dense_4h_to_h.bias,
-            in_features=layer.mlp.dense_4h_to_h.in_features,
-            out_features=layer.mlp.dense_4h_to_h.out_features,
-            bias=True,
-            dtype=torch.half,
-            device=layer.mlp.dense_4h_to_h.weight.device,
-        )
-    return model
+
+        self.do_lower_case = do_lower_case
+        self.remove_space = remove_space
+        self.vocab_file = vocab_file
+
+        self.bos_token = bos_token
+        self.eos_token = eos_token
+        self.eop_token = eop_token
+        self.mask_token = mask_token
+        self.gMASK_token = gmask_token
+
+        self.sp_tokenizer = SPTokenizer(vocab_file)
+
+        """ Initialisation """
+
+    @property
+    def eop_token_id(self) -> Optional[int]:
+        """
+        `Optional[int]`: Id of the end of sentence token in the vocabulary. Returns `None` if the token has not been
+        set.
+        """
+        if self.eop_token is None:
+            return None
+        return self.convert_tokens_to_ids(self.eop_token)
+
+    @property
+    def vocab_size(self):
+        """ Returns vocab size """
+        return self.sp_tokenizer.num_tokens
+
+    def get_vocab(self):
+        """ Returns vocab as a dict """
+        vocab = {self._convert_id_to_token(i): i for i in range(self.vocab_size)}
+        vocab.update(self.added_tokens_encoder)
+        return vocab
+
+    def preprocess_text(self, inputs):
+        if self.remove_space:
+            outputs = " ".join(inputs.strip().split())
+        else:
+            outputs = inputs
+
+        if self.do_lower_case:
+            outputs = outputs.lower()
+
+        return outputs
+
+    def _tokenize(self, text, **kwargs):
+        """ Returns a tokenized string. """
+        text = self.preprocess_text(text)
+
+        seq = self.sp_tokenizer.tokenize(text)
+
+        return seq
+
+    def decode(
+            self,
+            token_ids: Union[List[int], List[List[int]]],
+            skip_special_tokens: bool = False,
+            clean_up_tokenization_spaces: bool = True,
+            spaces_between_special_tokens: bool = True,
+            **kwargs
+    ) -> str:
+        if isinstance(token_ids[0], list):
+            tokens = []
+            for single_token_ids in token_ids:
+                if self.pad_token_id in single_token_ids:  # remove pad
+                    single_token_ids = list(filter((self.pad_token_id).__ne__, single_token_ids))
+                tokens.append(self.sp_tokenizer.decode(single_token_ids))
+            return (tokens)
+        else:
+            if self.pad_token_id in token_ids:  # remove pad
+                token_ids = list(filter((self.pad_token_id).__ne__, token_ids))
+            return self.sp_tokenizer.decode(token_ids)
+
+    def _convert_token_to_id(self, token):
+        """ Converts a token (str) in an id using the vocab. """
+        return self.sp_tokenizer[token]
+
+    def _convert_id_to_token(self, index):
+        """Converts an index (integer) in a token (str) using the vocab."""
+        return self.sp_tokenizer[index]
+
+    def save_vocabulary(self, save_directory, filename_prefix=None):
+        """
+        Save the vocabulary and special tokens file to a directory.
+
+        Args:
+            save_directory (`str`):
+                The directory in which to save the vocabulary.
+            filename_prefix (`str`, *optional*):
+                An optional prefix to add to the named of the saved files.
+
+        Returns:
+            `Tuple(str)`: Paths to the files saved.
+        """
+        if os.path.isdir(save_directory):
+            vocab_file = os.path.join(
+                save_directory, self.vocab_files_names["vocab_file"]
+            )
+        else:
+            vocab_file = save_directory
+
+        with open(self.vocab_file, 'rb') as fin:
+            proto_str = fin.read()
+
+        with open(vocab_file, "wb") as writer:
+            writer.write(proto_str)
+
+        return (vocab_file,)
+
+    def build_inputs_with_special_tokens(
+            self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+    ) -> List[int]:
+        """
+        Build model inputs from a sequence or a pair of sequence for sequence classification tasks by concatenating and
+        adding special tokens. A BERT sequence has the following format:
+
+        - single sequence: `[CLS] X [SEP]`
+        - pair of sequences: `[CLS] A [SEP] B [SEP]`
+
+        Args:
+            token_ids_0 (`List[int]`):
+                List of IDs to which the special tokens will be added.
+            token_ids_1 (`List[int]`, *optional*):
+                Optional second list of IDs for sequence pairs.
+
+        Returns:
+            `List[int]`: List of [input IDs](../glossary#input-ids) with the appropriate special tokens.
+        """
+        if token_ids_1 is not None:
+            token_ids_0 += token_ids_1
+        mask_ids = self.sp_tokenizer[self.mask_token]
+        gmask_ids = self.sp_tokenizer[self.gMASK_token]
+        if mask_ids not in token_ids_0 and gmask_ids not in token_ids_0:
+            token_ids_0 += [gmask_ids]
+
+        if token_ids_0[-1] != mask_ids and token_ids_0[-1] != gmask_ids:
+            token_ids_0 += [self.sp_tokenizer[self.eos_token]]
+
+        token_ids_0 += [self.sp_tokenizer[self.bos_token]]
+
+        return token_ids_0

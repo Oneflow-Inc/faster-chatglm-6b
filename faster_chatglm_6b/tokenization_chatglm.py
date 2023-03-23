@@ -1,3 +1,4 @@
+# This code is base on https://huggingface.co/THUDM/chatglm-6b/blob/main/tokenization_chatglm.py
 """Tokenization classes for ChatGLM."""
 import sys
 import unicodedata

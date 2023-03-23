@@ -1,3 +1,4 @@
+# This code is base on https://huggingface.co/THUDM/chatglm-6b/blob/main/quantization.py
 from torch.nn import Linear
 from torch.nn.parameter import Parameter
 
@@ -124,8 +125,8 @@ class QuantizedLinear(Linear):
             )
             self.weight_scale = torch.empty(shape[0], dtype=kwargs["params_dtype"], device=kwargs["device"])
         else:
-            self.weight_scale = (weight_tensor.abs().max(dim=-1).values / ((2 ** (weight_bit_width - 1)) - 1)).half()
-            self.weight = torch.round(weight_tensor / self.weight_scale[:, None]).to(torch.int8)
+            self.weight_scale = (weight_tensor.abs().float().max(dim=-1, keepdim=True).values / ((2 ** (weight_bit_width - 1)) - 1)).half()
+            self.weight = torch.round(weight_tensor / self.weight_scale).to(torch.int8)
             if weight_bit_width == 4:
                 self.weight = compress_int4_weight(self.weight)
 
@@ -134,15 +135,17 @@ class QuantizedLinear(Linear):
         self.bias = Parameter(bias_tensor.to(kwargs["device"]), requires_grad=False)
 
     def forward(self, input):
-        output = W8A16Linear.apply(input, self.weight, self.weight_scale, self.weight_bit_width)
-        if self.bias is not None:
-            output = output + self.bias
+        output = torch._C.fused_linear_with_groupwise_quantized_weight(
+            input, self.weight, self.weight_scale, w_zero=None,
+            b=self.bias, num_bits=self.weight_bit_width, symmetric=True,
+            group_dim=-1, group_size=self.weight.shape[-1]
+        )
         return output
 
 
 def quantize(model, weight_bit_width):
     """Replace fp16 linear with quantized linear"""
-
+    assert(weight_bit_width==8), "only support 8-bit quantization now."
     for layer in model.layers:
         layer.attention.query_key_value = QuantizedLinear(
             weight_bit_width=weight_bit_width,

@@ -1,3 +1,5 @@
+# This code is base on https://github.com/THUDM/ChatGLM-6B/blob/main/web_demo.py
+
 import faster_chatglm_6b
 from transformers import AutoModel, AutoTokenizer
 import gradio as gr
@@ -15,8 +17,9 @@ def predict(input, max_length, top_p, temperature, history=None):
     if history is None:
         history = []
     with torch.no_grad():
-        for response, history in model.stream_chat(tokenizer, input, history, max_length=max_length, top_p=top_p,
-                                                   temperature=temperature):
+        for response, history in model.stream_chat(
+            tokenizer, input, history, max_length=max_length, top_p=top_p, temperature=temperature
+        ):
             updates = []
             for query, response in history:
                 updates.append(gr.update(visible=True, value="用户：" + query))
@@ -37,12 +40,17 @@ with gr.Blocks() as demo:
 
     with gr.Row():
         with gr.Column(scale=4):
-            txt = gr.Textbox(show_label=False, placeholder="Enter text and press enter", lines=11).style(
-                container=False)
+            txt = gr.Textbox(
+                show_label=False, placeholder="Enter text and press enter", lines=11
+            ).style(container=False)
         with gr.Column(scale=1):
-            max_length = gr.Slider(0, 4096, value=2048, step=1.0, label="Maximum length", interactive=True)
+            max_length = gr.Slider(
+                0, 4096, value=2048, step=1.0, label="Maximum length", interactive=True
+            )
             top_p = gr.Slider(0, 1, value=0.7, step=0.01, label="Top P", interactive=True)
-            temperature = gr.Slider(0, 1, value=0.95, step=0.01, label="Temperature", interactive=True)
+            temperature = gr.Slider(
+                0, 1, value=0.95, step=0.01, label="Temperature", interactive=True
+            )
             button = gr.Button("Generate")
     button.click(predict, [txt, max_length, top_p, temperature, state], [state] + text_boxes)
 demo.queue().launch(share=False, inbrowser=True)

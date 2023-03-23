@@ -1,3 +1,5 @@
+# This code is base on https://github.com/THUDM/ChatGLM-6B project
+
 import faster_chatglm_6b
 
 from transformers import AutoTokenizer, AutoModel

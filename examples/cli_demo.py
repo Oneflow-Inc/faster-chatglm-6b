@@ -1,3 +1,5 @@
+# This code is base on https://github.com/THUDM/ChatGLM-6B/blob/main/cli_demo.py
+
 import faster_chatglm_6b
 import os
 import platform
@@ -8,7 +10,7 @@ model = AutoModel.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True).ha
 model = model.eval()
 
 os_name = platform.system()
-clear_command = 'cls' if os_name == 'Windows' else 'clear'
+clear_command = "cls" if os_name == "Windows" else "clear"
 
 
 def build_prompt(history):
@@ -18,7 +20,10 @@ def build_prompt(history):
         prompt += f"\n\nChatGLM-6B：{response}"
     return prompt
 
+
 import torch
+
+
 @torch.no_grad()
 def main():
     history = []

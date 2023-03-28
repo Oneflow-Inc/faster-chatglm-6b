@@ -64,4 +64,3 @@ examples/
 1. OneFlow 支持 skip_init 功能之后，`faster_chatglm_6b/__init__.py`中移除`new_skip_init`。
 2. 移除 `cli_demo.py` 和 `web_demo.py` 中对 `torch.no_grad` 的依赖。
 
-

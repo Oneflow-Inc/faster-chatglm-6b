@@ -4,15 +4,10 @@
 
 ## 软件依赖
 
-1. 请直接使用下面命令安装 OneFlow nightly CUDA 11.7 版本的安装包：
+请直接使用下面命令安装 OneFlow nightly CUDA 11.7 版本的安装包：
 
 ```shell
 python3 -m pip install --pre oneflow -f https://staging.oneflow.info/branch/master/cu117
-```
-
-2. 其他依赖，请参照 [ChatGLM-6B 软件依赖](https://huggingface.co/THUDM/chatglm-6b#%E8%BD%AF%E4%BB%B6%E4%BE%9D%E8%B5%96)
-```shell
-pip install protobuf==3.20.0 transformers==4.26.1 icetk cpm_kernels
 ```
 
 ## 安装方式

@@ -36,7 +36,7 @@ python3 -m pip install -e .
 
 1. 设置`OneFlow`的一些环境变量，用于控制 OneFlow 框架的行为。
 2. 使用`OneFlow`的`mock_torch`方法把所有的`PyTorch`模块替换成对应的`OneFlow`模块。
-3. 利用`transformers`模块的动态模块工具，把找到的原`ChatGLM-6B`中的`ChatGLMForConditionalGeneration`模块替换成经过`OneFlow`优化的`ChatGLMForConditionalGeneration`模块
+3. 利用`transformers`模块的动态模块工具，把找到的原`ChatGLM-6B`中的`ChatGLMForConditionalGeneration`模块替换成经过`OneFlow`优化的`ChatGLMForConditionalGeneration`模块。
 
 这一行的详细行为，请参考`faster_chatglm_6b/__init__.py`。
 

@@ -292,20 +292,10 @@ class SelfAttention(torch.nn.Module):
         # [seq_len, batch, 3 * hidden_size]
         mixed_raw_layer = self.query_key_value(hidden_states)
 
-        # [seq_len, batch, 3 * hidden_size] --> [seq_len, batch, num_attention_heads, 3 * hidden_size_per_attention_head]
-        new_tensor_shape = mixed_raw_layer.size()[:-1] + (
-            self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
-        )
-        mixed_raw_layer = mixed_raw_layer.view(*new_tensor_shape)
-
-        # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
-        (query_layer, key_layer, value_layer) = self.split_tensor_along_last_dim(mixed_raw_layer, 3)
-
         k = self.hidden_size_per_attention_head
         if self.position_encoding_2d:
-            query_layer = torch._C.fused_apply_rotary_emb(query_layer, x_layout="MBHK", output_layout="MBHK", tensor_index=0, position_ids=position_ids, k_size=k, mode="plane",rotary_size=k)
-            key_layer = torch._C.fused_apply_rotary_emb(key_layer, x_layout="MBHK", output_layout="MBHK", tensor_index=1, position_ids=position_ids, k_size=k, mode="plane",rotary_size=k)
+            query_layer = torch._C.fused_apply_rotary_emb(mixed_raw_layer, x_layout="MB(H3K)", output_layout="MBHK", tensor_index=0, position_ids=position_ids, k_size=k, mode="plane",rotary_size=k)
+            key_layer = torch._C.fused_apply_rotary_emb(mixed_raw_layer, x_layout="MB(H3K)", output_layout="MBHK", tensor_index=1, position_ids=position_ids, k_size=k, mode="plane",rotary_size=k)
         else:
             position_ids = position_ids.transpose(0, 1)
             cos, sin = self.rotary_emb(value_layer, seq_len=position_ids.max() + 1)
@@ -318,8 +308,11 @@ class SelfAttention(torch.nn.Module):
                 past_key=past_key, past_key_layout="MBHK",
                 past_value=past_value, past_value_layout="MBHK",
                 key=key_layer, key_layout="MBHK",
-                value=value_layer, value_layout="MBHK"
+                value=mixed_raw_layer, value_layout="MB(H3K)"
             )
+        else:
+            # for use_cache && past_value
+            value_layer = mixed_raw_layer.view(*mixed_raw_layer.shape[:2], -1, 3, k)[:, :, :, 2, :]
 
         if use_cache:
             present = (key_layer, value_layer)

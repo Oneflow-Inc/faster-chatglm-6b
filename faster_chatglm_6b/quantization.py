@@ -10,6 +10,18 @@ import ctypes
 from typing import List
 from cpm_kernels.kernels.base import LazyKernelCModule, KernelFunction, round_up
 
+import numpy as np
+
+def _pack_int8_to_int4(x):
+    np_x = x.numpy()
+    l = np_x[..., 0::2]
+    r = np_x[..., 1::2]
+    l = np.left_shift(l, 4)
+    sign_r = np.bitwise_and(np.right_shift(r, 4), 0x8)
+    r = np.bitwise_or(np.bitwise_and(r, 0x7), sign_r)
+
+    packed = torch.tensor(np.bitwise_or(l, r), device=x.device)
+    return packed
 
 class W8A16Linear(torch.autograd.Function):
     @staticmethod
@@ -128,7 +140,7 @@ class QuantizedLinear(Linear):
             self.weight_scale = (weight_tensor.abs().float().max(dim=-1, keepdim=True).values / ((2 ** (weight_bit_width - 1)) - 1)).half()
             self.weight = torch.round(weight_tensor / self.weight_scale).to(torch.int8)
             if weight_bit_width == 4:
-                self.weight = compress_int4_weight(self.weight)
+                self.weight = _pack_int8_to_int4(self.weight)
 
         self.weight = Parameter(self.weight.to(kwargs["device"]), requires_grad=False)
         self.weight_scale = Parameter(self.weight_scale.to(kwargs["device"]), requires_grad=False)
@@ -138,14 +150,14 @@ class QuantizedLinear(Linear):
         output = torch._C.fused_linear_with_groupwise_quantized_weight(
             input, self.weight, self.weight_scale, w_zero=None,
             b=self.bias, num_bits=self.weight_bit_width, symmetric=True,
-            group_dim=-1, group_size=self.weight.shape[-1]
+            group_dim=-1, group_size=-1
         )
         return output
 
 
 def quantize(model, weight_bit_width):
     """Replace fp16 linear with quantized linear"""
-    assert(weight_bit_width==8), "only support 8-bit quantization now."
+    assert(weight_bit_width in [4, 8]), "only support 4-bit or 8-bit quantization."
     for layer in model.layers:
         layer.attention.query_key_value = QuantizedLinear(
             weight_bit_width=weight_bit_width,

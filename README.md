@@ -1,6 +1,6 @@
 # faster-chatglm-6b
 
-`faster-chatglm-6b` 是一个使用 OneFlow 深度学习框架为后端加速[THUDM/chatglm-6b](https://huggingface.co/THUDM/chatglm-6b)运行的项目。
+`faster-chatglm-6b` 是一个使用 [OneFlow](https://github.com/Oneflow-Inc/oneflow) 深度学习框架为后端加速[THUDM/chatglm-6b](https://huggingface.co/THUDM/chatglm-6b)运行的项目。
 
 ## 软件依赖
 

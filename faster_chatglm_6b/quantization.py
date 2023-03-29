@@ -17,9 +17,7 @@ def _pack_int8_to_int4(x):
     l = np_x[..., 0::2]
     r = np_x[..., 1::2]
     l = np.left_shift(l, 4)
-    sign_r = np.bitwise_and(np.right_shift(r, 4), 0x8)
-    r = np.bitwise_or(np.bitwise_and(r, 0x7), sign_r)
-
+    r = np.bitwise_and(r, np.int8(0xF))
     packed = torch.tensor(np.bitwise_or(l, r), device=x.device)
     return packed
 

@@ -2,8 +2,6 @@ import os
 os.environ["ONEFLOW_LINEAR_EMBEDDING_SKIP_INIT"] = "1"
 os.environ["ONEFLOW_KERNEL_ENABLE_FUSED_LINEAR"] = "1"
 
-__version__ = '0.0.1'
-
 import oneflow as flow
 from oneflow import nn
 

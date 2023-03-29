@@ -1,10 +1,4 @@
-import os
-
 from setuptools import find_packages, setup
-
-with open(os.path.join(os.path.dirname(__file__), "faster_chatglm_6b", "__init__.py")) as f:
-    version_line = [line for line in f.read().splitlines() if line.startswith("__version__")][0]
-    __version__ = version_line.split("=")[1].strip().strip("'\"")
 
 
 def read_file(file_path):
@@ -14,7 +8,7 @@ def read_file(file_path):
 
 setup(
     name="faster-chatglm-6b",
-    version=__version__,
+    version="0.0.0",
     description="faster-chatglm-6b is a project that uses the OneFlow as the backend to accelerate THUDM/chatglm-6b.",
     long_description=read_file("README.md"),
     long_description_content_type="text/markdown",

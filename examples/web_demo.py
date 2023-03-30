@@ -8,7 +8,7 @@ import torch
 tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True)
 model = (
     AutoModel.from_pretrained(
-        "THUDM/chatglm-6b", trust_remote_code=True, revision=faster_chatglm_6b.revison
+        "THUDM/chatglm-6b", trust_remote_code=True, revision=faster_chatglm_6b.revision
     )
     .half()
     .cuda()

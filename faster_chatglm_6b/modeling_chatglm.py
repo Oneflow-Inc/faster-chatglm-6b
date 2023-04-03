@@ -690,7 +690,7 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
     def get_position_ids(self, seq, mask_position, device, gmask=False):
         context_length = seq.index(self.config.bos_token_id) + 1
         if self.position_encoding_2d:
-            seq_length = seq.index(self.config.bos_token_id)
+            seq_length = len(seq)
             position_ids = torch.arange(context_length, dtype=torch.long, device=device)
             if not gmask:
                 position_ids[seq_length:] = mask_position

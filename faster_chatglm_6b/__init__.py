@@ -19,9 +19,9 @@ orig_get_class_from_dynamic_module = dynamic_module_utils.get_class_from_dynamic
 
 def hook_get_class_from_dynamic_module(*args, **kwargs):
     _, _, cls_name = args
-    if cls_name == "ChatGLMForConditionalGeneration":
-        from .modeling_chatglm import ChatGLMForConditionalGeneration
-        return ChatGLMForConditionalGeneration
+    if cls_name == "ChatGLMModel":
+        from .oneflow_modules import ChatGLMModel
+        return ChatGLMModel
     else:
         return orig_get_class_from_dynamic_module(*args, **kwargs)
 

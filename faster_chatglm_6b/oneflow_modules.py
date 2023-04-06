@@ -33,14 +33,6 @@ from transformers.generation.utils import LogitsProcessorList, StoppingCriteriaL
 
 from .configuration_chatglm import ChatGLMConfig
 
-# flags required to enable jit fusion kernels
-
-if sys.platform != 'darwin':
-    torch._C._jit_set_profiling_mode(False)
-    torch._C._jit_set_profiling_executor(False)
-    torch._C._jit_override_can_fuse_on_cpu(True)
-    torch._C._jit_override_can_fuse_on_gpu(True)
-
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "THUDM/ChatGLM-6B"
@@ -172,7 +164,7 @@ def gelu_impl(x):
 
 
 def gelu(x):
-    return gelu_impl(x)
+    return torch._C.fast_gelu(x)
 
 
 class RotaryEmbedding(torch.nn.Module):
@@ -253,9 +245,13 @@ def attention_fn(
         use_cache=False,
 ):
     if layer_past is not None:
-        past_key, past_value = layer_past[0], layer_past[1]
-        key_layer = torch.cat((past_key, key_layer), dim=0)
-        value_layer = torch.cat((past_value, value_layer), dim=0)
+        past_key, past_value = layer_past
+        key_layer, value_layer = torch._C.fused_attention_concat_past_key_value(
+            past_key=past_key, past_key_layout="MBHK",
+            past_value=past_value, past_value_layout="MBHK",
+            key=key_layer, key_layout="MBHK",
+            value=value_layer, value_layout="MBHK"
+        )
 
     # seqlen, batch, num_attention_heads, hidden_size_per_attention_head
     seq_len, b, nh, hidden_size = key_layer.shape
@@ -265,85 +261,16 @@ def attention_fn(
     else:
         present = None
 
-    query_key_layer_scaling_coeff = float(layer_id + 1)
-    if scaling_attention_score:
-        query_layer = query_layer / (math.sqrt(hidden_size) * query_key_layer_scaling_coeff)
-
-    # ===================================
-    # Raw attention scores. [b, np, s, s]
-    # ===================================
-
-    # [b, np, sq, sk]
-    output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
-
-    # [sq, b, np, hn] -> [sq, b * np, hn]
-    query_layer = query_layer.view(output_size[2], output_size[0] * output_size[1], -1)
-    # [sk, b, np, hn] -> [sk, b * np, hn]
-    key_layer = key_layer.view(output_size[3], output_size[0] * output_size[1], -1)
-
-    matmul_result = torch.empty(
-        output_size[0] * output_size[1],
-        output_size[2],
-        output_size[3],
-        dtype=query_layer.dtype,
-        device=query_layer.device,
+    context_layer = torch._C.fused_multi_head_attention_inference_v2(
+        query = query_layer, query_layout = "MBHK",
+        key = key_layer, key_layout = "MBHK",
+        value = value_layer, value_layout = "MBHK",
+        scale = 1 / math.sqrt(hidden_size),
+        attn_bias = attention_bias,
+        output_layout = "MB(HK)",
     )
-
-    matmul_result = torch.baddbmm(
-        matmul_result,
-        query_layer.transpose(0, 1),  # [b * np, sq, hn]
-        key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-        beta=0.0,
-        alpha=1.0,
-    )
-
-    # change view to [b, np, sq, sk]
-    attention_scores = matmul_result.view(*output_size)
-
-    if self.scale_mask_softmax:
-        self.scale_mask_softmax.scale = query_key_layer_scaling_coeff
-        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask.contiguous())
-    else:
-        if not (attention_mask == 0).all():
-            # if auto-regressive, skip
-            attention_scores.masked_fill_(attention_mask, -10000.0)
-        dtype = attention_scores.dtype
-        attention_scores = attention_scores.float()
-        attention_scores = attention_scores * query_key_layer_scaling_coeff
-
-        attention_probs = F.softmax(attention_scores, dim=-1)
-
-        attention_probs = attention_probs.type(dtype)
-
-    # =========================
-    # Context layer. [sq, b, hp]
-    # =========================
-
-    # value_layer -> context layer.
-    # [sk, b, np, hn] --> [b, np, sq, hn]
-
-    # context layer shape: [b, np, sq, hn]
-    output_size = (value_layer.size(1), value_layer.size(2), query_layer.size(0), value_layer.size(3))
-
-    # change view [sk, b * np, hn]
-    value_layer = value_layer.view(value_layer.size(0), output_size[0] * output_size[1], -1)
-
-    # change view [b * np, sq, sk]
-    attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
-
-    # matmul: [b * np, sq, hn]
-    context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-
-    # change view [b, np, sq, hn]
-    context_layer = context_layer.view(*output_size)
-
-    # [b, np, sq, hn] --> [sq, b, np, hn]
-    context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
-
-    # [sq, b, np, hn] --> [sq, b, hp]
-    new_context_layer_shape = context_layer.size()[:-2] + (hidden_size_per_partition,)
-    context_layer = context_layer.view(*new_context_layer_shape)
-
+    
+    attention_probs = None # set attention_probs to None when use fmha
     outputs = (context_layer, present, attention_probs)
 
     return outputs
@@ -425,7 +352,7 @@ class SelfAttention(torch.nn.Module):
             self,
             hidden_states: torch.Tensor,
             position_ids,
-            attention_mask: torch.Tensor,
+            attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
@@ -433,7 +360,7 @@ class SelfAttention(torch.nn.Module):
     ):
         """
         hidden_states: [seq_len, batch, hidden_size]
-        attention_mask: [(1, 1), seq_len, seq_len]
+        attention_bias: [(1, 1), seq_len, seq_len]
         """
 
         # [seq_len, batch, 3 * hidden_size]
@@ -496,7 +423,7 @@ class GEGLU(torch.nn.Module):
     def forward(self, x):
         # dim=-1 breaks in jit for pt<1.10
         x1, x2 = x.chunk(2, dim=(x.ndim - 1))
-        return x1 * self.activation_fn(x2)
+        return torch._C.fused_fast_gelu_mul(x2, x1)
 
 
 class GLU(torch.nn.Module):
@@ -527,7 +454,7 @@ class GLU(torch.nn.Module):
             dtype=params_dtype,
         )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, skip, skip_scale):
         """
         hidden_states: [seq_len, batch, hidden_size]
         """
@@ -537,7 +464,17 @@ class GLU(torch.nn.Module):
 
         intermediate_parallel = self.activation_func(intermediate_parallel)
 
-        output = self.dense_4h_to_h(intermediate_parallel)
+        if self.dense_4h_to_h.weight.dtype == torch.float16:
+            return torch._C.fused_matmul_bias(
+                    x=intermediate_parallel,
+                    weight=self.dense_4h_to_h.weight,
+                    bias=self.dense_4h_to_h.bias,
+                    _add_to_output=skip,
+                    beta=skip_scale,
+                    )
+        else:
+            output = self.dense_4h_to_h(intermediate_parallel)
+            output = skip * skip_scale + output
 
         return output
 
@@ -596,7 +533,7 @@ class GLMBlock(torch.nn.Module):
             self,
             hidden_states: torch.Tensor,
             position_ids,
-            attention_mask: torch.Tensor,
+            attention_bias: torch.Tensor,
             layer_id,
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
@@ -604,7 +541,7 @@ class GLMBlock(torch.nn.Module):
     ):
         """
         hidden_states: [seq_len, batch, hidden_size]
-        attention_mask: [(1, 1), seq_len, seq_len]
+        attention_bias: [(1, 1), seq_len, seq_len]
         """
 
         # Layer norm at the begining of the transformer layer.
@@ -615,7 +552,7 @@ class GLMBlock(torch.nn.Module):
         attention_outputs = self.attention(
             attention_input,
             position_ids,
-            attention_mask=attention_mask,
+            attention_bias=attention_bias,
             layer_id=layer_id,
             layer_past=layer_past,
             use_cache=use_cache,
@@ -628,15 +565,18 @@ class GLMBlock(torch.nn.Module):
 
         # Residual connection.
         alpha = (2 * self.num_layers) ** 0.5
-        hidden_states = attention_input * alpha + attention_output
 
-        mlp_input = self.post_attention_layernorm(hidden_states)
+        mlp_input = torch._C.skip_layer_norm(
+                x=attention_output,
+                gamma=self.post_attention_layernorm.weight,
+                beta=self.post_attention_layernorm.bias,
+                skip=attention_input,
+                alpha=alpha,
+                epsilon=self.post_attention_layernorm.eps,
+                )
 
         # MLP.
-        mlp_output = self.mlp(mlp_input)
-
-        # Second residual connection.
-        output = mlp_input * alpha + mlp_output
+        output = self.mlp(mlp_input, skip=mlp_input, skip_scale=alpha)
 
         if use_cache:
             outputs = (output,) + outputs
@@ -904,9 +844,6 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        if inputs_embeds is None:
-            inputs_embeds = self.word_embeddings(input_ids)
-
         if past_key_values is None:
             if self.pre_seq_len is not None:
                 past_key_values = self.get_prompt(batch_size=input_ids.shape[0], device=input_ids.device,
@@ -948,10 +885,13 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
 
         if attention_mask is None:
-            attention_mask = torch.zeros(1, 1, device=input_ids.device).bool()
-
+            attention_bias = None
         else:
-            attention_mask = attention_mask.to(input_ids.device)
+            attention_bias = attention_mask * (-10000.)
+            pad = attention_bias.shape[-1] % 8
+            if pad > 0:
+                attention_bias = nn.functional.pad(attention_bias, (0, 8 - pad))
+            attention_bias = attention_bias.to(input_ids.device).to(self.params_dtype)
 
         for i, layer in enumerate(self.layers):
 
@@ -964,7 +904,7 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
                     layer,
                     hidden_states,
                     position_ids,
-                    attention_mask,
+                    attention_bias,
                     torch.tensor(i),
                     layer_past,
                     use_cache,
@@ -974,7 +914,7 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
                 layer_ret = layer(
                     hidden_states,
                     position_ids=position_ids,
-                    attention_mask=attention_mask,
+                    attention_bias=attention_bias,
                     layer_id=torch.tensor(i),
                     layer_past=layer_past,
                     use_cache=use_cache,
@@ -1005,402 +945,3 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             attentions=all_self_attentions,
         )
 
-
-class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
-    def __init__(self, config: ChatGLMConfig):
-        super().__init__(config)
-
-        # self.hidden_size = config.hidden_size
-        # self.params_dtype = torch.half
-        # self.vocab_size = config.vocab_size
-        self.max_sequence_length = config.max_sequence_length
-
-        self.position_encoding_2d = config.position_encoding_2d
-
-        self.transformer = ChatGLMModel(config)
-
-        self.lm_head = skip_init(
-            nn.Linear,
-            config.hidden_size,
-            config.vocab_size,
-            bias=False,
-            dtype=torch.half
-        )
-
-        self.config = config
-
-        self.quantized = False
-
-        if self.config.quantization_bit:
-            self.quantize(self.config.quantization_bit, empty_init=True)
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def _update_model_kwargs_for_generation(
-        self,
-        outputs: ModelOutput,
-        model_kwargs: Dict[str, Any],
-        is_encoder_decoder: bool = False,
-        standardize_cache_format: bool = False,
-    ) -> Dict[str, Any]:
-        # update past_key_values
-        model_kwargs["past_key_values"] = self._extract_past_from_model_output(
-            outputs, standardize_cache_format=standardize_cache_format
-        )
-
-        # update attention mask
-        if "attention_mask" in model_kwargs:
-            attention_mask = model_kwargs["attention_mask"]
-            if attention_mask is not None and attention_mask.dtype == torch.bool:
-                attention_mask = torch.cat(
-                    [attention_mask, attention_mask.new_ones((*attention_mask.shape[:3], 1))], dim=3)
-                new_attention_mask = attention_mask[:, :, -1:].clone()
-                new_attention_mask[..., -1] = False
-                model_kwargs["attention_mask"] = torch.cat(
-                    [attention_mask, new_attention_mask], dim=2
-                )
-
-        # update position ids
-        if "position_ids" in model_kwargs:
-            position_ids = model_kwargs["position_ids"]
-            new_position_id = position_ids[..., -1:].clone()
-            new_position_id[:, 1, :] += 1
-            model_kwargs["position_ids"] = torch.cat(
-                [position_ids, new_position_id], dim=-1
-            )
-
-        return model_kwargs
-
-    def prepare_inputs_for_generation(
-            self,
-            input_ids: torch.LongTensor,
-            past: Optional[torch.Tensor] = None,
-            past_key_values: Optional[torch.Tensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.Tensor] = None,
-            **kwargs
-    ) -> dict:
-        batch_size, seq_length = input_ids.shape
-        MASK, gMASK = 150000, 150001
-        mask_token = MASK if MASK in input_ids else gMASK
-        use_gmask = False if MASK in input_ids else True
-        seqs = input_ids.tolist()
-        mask_positions = [seq.index(mask_token) for seq in seqs]
-
-        # only last token for input_ids if past is not None
-        if past is not None or past_key_values is not None:
-            last_token = input_ids[:, -1].unsqueeze(-1)
-            if attention_mask is not None and attention_mask.dtype == torch.bool:
-                attention_mask = attention_mask[:, :, -1:]
-            else:
-                attention_mask = None
-            if position_ids is not None:
-                position_ids = position_ids[..., -1:]
-            else:
-                context_lengths = [seq.index(self.config.bos_token_id) for seq in seqs]
-                if self.position_encoding_2d:
-                    position_ids = torch.tensor(
-                        [[mask_position, seq_length - context_length] for mask_position, context_length in
-                         zip(mask_positions, context_lengths)], dtype=torch.long, device=input_ids.device).unsqueeze(-1)
-                else:
-                    position_ids = torch.tensor([mask_position for mask_position in mask_positions], dtype=torch.long,
-                                                device=input_ids.device).unsqueeze(-1)
-
-            if past is None:
-                past = past_key_values
-            return {
-                "input_ids": last_token,
-                "past_key_values": past,
-                "position_ids": position_ids,
-                "attention_mask": attention_mask
-            }
-        else:
-            if attention_mask is not None and attention_mask.dtype != torch.bool:
-                logger.warning_once(f"The dtype of attention mask ({attention_mask.dtype}) is not bool")
-                attention_mask = None
-            if attention_mask is None:
-                attention_mask = self.get_masks(
-                    input_ids,
-                    device=input_ids.device
-                )
-            if position_ids is None:
-                position_ids = self.get_position_ids(
-                    input_ids,
-                    device=input_ids.device,
-                    mask_positions=mask_positions,
-                    gmask=use_gmask
-                )
-
-            return {
-                "input_ids": input_ids,
-                "past_key_values": past,
-                "position_ids": position_ids,
-                "attention_mask": attention_mask
-            }
-
-    def forward(
-            self,
-            input_ids: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.Tensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            past_key_values: Optional[Tuple[torch.FloatTensor]] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
-            labels: Optional[torch.Tensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-    ):
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        transformer_outputs = self.transformer(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        hidden_states = transformer_outputs[0]
-
-        lm_logits = self.lm_head(hidden_states).permute(1, 0, 2).contiguous()
-
-        loss = None
-        if labels is not None:
-            lm_logits = lm_logits.to(torch.float32)
-
-            # Shift so that tokens < n predict n
-            shift_logits = lm_logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-
-            lm_logits = lm_logits.to(hidden_states.dtype)
-            loss = loss.to(hidden_states.dtype)
-
-        if not return_dict:
-            output = (lm_logits,) + transformer_outputs[1:]
-            return ((loss,) + output) if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=lm_logits,
-            past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-        )
-
-    @staticmethod
-    def _reorder_cache(
-            past: Tuple[Tuple[torch.Tensor, torch.Tensor], ...], beam_idx: torch.LongTensor
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], ...]:
-        """
-        This function is used to re-order the `past_key_values` cache if [`~PreTrainedModel.beam_search`] or
-        [`~PreTrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
-        beam_idx at every generation step.
-
-        Output shares the same memory storage as `past`.
-        """
-        return tuple(
-            (
-                layer_past[0].index_select(1, beam_idx.to(layer_past[0].device)),
-                layer_past[1].index_select(1, beam_idx.to(layer_past[1].device)),
-            )
-            for layer_past in past
-        )
-
-    def process_response(self, response):
-        response = response.strip()
-        response = response.replace("[[训练时间]]", "2023年")
-        punkts = [
-            [",", "，"],
-            ["!", "！"],
-            [":", "："],
-            [";", "；"],
-            ["\?", "？"],
-        ]
-        for item in punkts:
-            response = re.sub(r"([\u4e00-\u9fff])%s" % item[0], r"\1%s" % item[1], response)
-            response = re.sub(r"%s([\u4e00-\u9fff])" % item[0], r"%s\1" % item[1], response)
-        return response
-
-    @torch.no_grad()
-    def chat(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, max_length: int = 2048, num_beams=1,
-             do_sample=True, top_p=0.7, temperature=0.95, logits_processor=None, **kwargs):
-        if history is None:
-            history = []
-        if logits_processor is None:
-            logits_processor = LogitsProcessorList()
-        logits_processor.append(InvalidScoreLogitsProcessor())
-        gen_kwargs = {"max_length": max_length, "num_beams": num_beams, "do_sample": do_sample, "top_p": top_p,
-                      "temperature": temperature, "logits_processor": logits_processor, **kwargs}
-        if not history:
-            prompt = query
-        else:
-            prompt = ""
-            for i, (old_query, response) in enumerate(history):
-                prompt += "[Round {}]\n问：{}\n答：{}\n".format(i, old_query, response)
-            prompt += "[Round {}]\n问：{}\n答：".format(len(history), query)
-        inputs = tokenizer([prompt], return_tensors="pt")
-        inputs = inputs.to(self.device)
-        outputs = self.generate(**inputs, **gen_kwargs)
-        outputs = outputs.tolist()[0][len(inputs["input_ids"][0]):]
-        response = tokenizer.decode(outputs)
-        response = self.process_response(response)
-        history = history + [(query, response)]
-        return response, history
-
-    @torch.no_grad()
-    def stream_chat(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, max_length: int = 2048,
-                    do_sample=True, top_p=0.7, temperature=0.95, logits_processor=None, **kwargs):
-        if history is None:
-            history = []
-        if logits_processor is None:
-            logits_processor = LogitsProcessorList()
-        logits_processor.append(InvalidScoreLogitsProcessor())
-        gen_kwargs = {"max_length": max_length, "do_sample": do_sample, "top_p": top_p,
-                      "temperature": temperature, "logits_processor": logits_processor, **kwargs}
-        if not history:
-            prompt = query
-        else:
-            prompt = ""
-            for i, (old_query, response) in enumerate(history):
-                prompt += "[Round {}]\n问：{}\n答：{}\n".format(i, old_query, response)
-            prompt += "[Round {}]\n问：{}\n答：".format(len(history), query)
-        inputs = tokenizer([prompt], return_tensors="pt")
-        inputs = inputs.to(self.device)
-        for outputs in self.stream_generate(**inputs, **gen_kwargs):
-            outputs = outputs.tolist()[0][len(inputs["input_ids"][0]):]
-            response = tokenizer.decode(outputs)
-            response = self.process_response(response)
-            new_history = history + [(query, response)]
-            yield response, new_history
-
-    @torch.no_grad()
-    def stream_generate(
-            self,
-            input_ids,
-            generation_config: Optional[GenerationConfig] = None,
-            logits_processor: Optional[LogitsProcessorList] = None,
-            stopping_criteria: Optional[StoppingCriteriaList] = None,
-            prefix_allowed_tokens_fn: Optional[Callable[[int, torch.Tensor], List[int]]] = None,
-            **kwargs,
-    ):
-        batch_size, input_ids_seq_length = input_ids.shape[0], input_ids.shape[-1]
-
-        if generation_config is None:
-            generation_config = self.generation_config
-        generation_config = copy.deepcopy(generation_config)
-        model_kwargs = generation_config.update(**kwargs)
-        bos_token_id, eos_token_id = generation_config.bos_token_id, generation_config.eos_token_id
-
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-
-        has_default_max_length = kwargs.get("max_length") is None and generation_config.max_length is not None
-        if has_default_max_length and generation_config.max_new_tokens is None:
-            warnings.warn(
-                f"Using `max_length`'s default ({generation_config.max_length}) to control the generation length. "
-                "This behaviour is deprecated and will be removed from the config in v5 of Transformers -- we"
-                " recommend using `max_new_tokens` to control the maximum length of the generation.",
-                UserWarning,
-            )
-        elif generation_config.max_new_tokens is not None:
-            generation_config.max_length = generation_config.max_new_tokens + input_ids_seq_length
-            if not has_default_max_length:
-                logger.warn(
-                    f"Both `max_new_tokens` (={generation_config.max_new_tokens}) and `max_length`(="
-                    f"{generation_config.max_length}) seem to have been set. `max_new_tokens` will take precedence. "
-                    "Please refer to the documentation for more information. "
-                    "(https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)",
-                    UserWarning,
-                )
-
-        if input_ids_seq_length >= generation_config.max_length:
-            input_ids_string = "decoder_input_ids" if self.config.is_encoder_decoder else "input_ids"
-            logger.warning(
-                f"Input length of {input_ids_string} is {input_ids_seq_length}, but `max_length` is set to"
-                f" {generation_config.max_length}. This can lead to unexpected behavior. You should consider"
-                " increasing `max_new_tokens`."
-            )
-
-        # 2. Set generation parameters if not already defined
-        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
-        stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
-
-        logits_processor = self._get_logits_processor(
-            generation_config=generation_config,
-            input_ids_seq_length=input_ids_seq_length,
-            encoder_input_ids=input_ids,
-            prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
-            logits_processor=logits_processor,
-        )
-
-        stopping_criteria = self._get_stopping_criteria(
-            generation_config=generation_config, stopping_criteria=stopping_criteria
-        )
-        logits_warper = self._get_logits_warper(generation_config)
-
-        unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
-        scores = None
-        while True:
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-            # forward pass to get next token
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=False,
-                output_hidden_states=False,
-            )
-
-            next_token_logits = outputs.logits[:, -1, :]
-
-            # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
-            next_token_scores = logits_warper(input_ids, next_token_scores)
-
-            # sample
-            probs = nn.functional.softmax(next_token_scores, dim=-1)
-            if generation_config.do_sample:
-                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
-            else:
-                next_tokens = torch.argmax(probs, dim=-1)
-
-            # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-            model_kwargs = self._update_model_kwargs_for_generation(
-                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
-            )
-            unfinished_sequences = unfinished_sequences.mul((sum(next_tokens != i for i in eos_token_id)).long())
-
-            # stop when each sentence is finished, or if we exceed the maximum length
-            if unfinished_sequences.max() == 0 or stopping_criteria(input_ids, scores):
-                break
-            yield input_ids
-
-    def quantize(self, bits: int, empty_init=False, **kwargs):
-        if bits == 0:
-            return
-
-        from .quantization import quantize
-
-        if self.quantized:
-            logger.info("Already quantized.")
-            return self
-
-        self.quantized = True
-
-        self.config.quantization_bit = bits
-
-        self.transformer = quantize(self.transformer, bits, empty_init=empty_init, **kwargs)
-        return self

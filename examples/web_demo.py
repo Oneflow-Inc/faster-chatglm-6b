@@ -5,7 +5,9 @@ from transformers import AutoModel, AutoTokenizer
 import gradio as gr
 import torch
 
-tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    "THUDM/chatglm-6b", trust_remote_code=True, revision=faster_chatglm_6b.revision
+)
 model = (
     AutoModel.from_pretrained(
         "THUDM/chatglm-6b", trust_remote_code=True, revision=faster_chatglm_6b.revision

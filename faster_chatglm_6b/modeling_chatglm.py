@@ -292,44 +292,27 @@ class SelfAttention(torch.nn.Module):
         # [seq_len, batch, 3 * hidden_size]
         mixed_raw_layer = self.query_key_value(hidden_states)
 
-        # [seq_len, batch, 3 * hidden_size] --> [seq_len, batch, num_attention_heads, 3 * hidden_size_per_attention_head]
-        new_tensor_shape = mixed_raw_layer.size()[:-1] + (
-            self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
-        )
-        mixed_raw_layer = mixed_raw_layer.view(*new_tensor_shape)
-
-        # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
-        (query_layer, key_layer, value_layer) = self.split_tensor_along_last_dim(mixed_raw_layer, 3)
-
+        k = self.hidden_size_per_attention_head
         if self.position_encoding_2d:
-            q1, q2 = query_layer.chunk(2, dim=(query_layer.ndim - 1))
-            k1, k2 = key_layer.chunk(2, dim=(key_layer.ndim - 1))
-            cos, sin = self.rotary_emb(q1, seq_len=position_ids.max() + 1)
-            position_ids, block_position_ids = position_ids[:, 0, :].transpose(0, 1).contiguous(), \
-                position_ids[:, 1, :].transpose(0, 1).contiguous()
-            q1, k1 = apply_rotary_pos_emb_index(q1, k1, cos, sin, position_ids)
-            q2, k2 = apply_rotary_pos_emb_index(q2, k2, cos, sin, block_position_ids)
-            query_layer = torch.concat([q1, q2], dim=(q1.ndim - 1))
-            key_layer = torch.concat([k1, k2], dim=(k1.ndim - 1))
+            query_layer = torch._C.fused_apply_rotary_emb(mixed_raw_layer, x_layout="MB(H3K)", output_layout="MBHK", tensor_index=0, position_ids=position_ids, k_size=k, mode="plane",rotary_size=k)
+            key_layer = torch._C.fused_apply_rotary_emb(mixed_raw_layer, x_layout="MB(H3K)", output_layout="MBHK", tensor_index=1, position_ids=position_ids, k_size=k, mode="plane",rotary_size=k)
         else:
             position_ids = position_ids.transpose(0, 1)
             cos, sin = self.rotary_emb(value_layer, seq_len=position_ids.max() + 1)
             # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
             query_layer, key_layer = apply_rotary_pos_emb_index(query_layer, key_layer, cos, sin, position_ids)
 
-        
         if layer_past is not None:
             past_key, past_value = layer_past
             key_layer, value_layer = torch._C.fused_attention_concat_past_key_value(
                 past_key=past_key, past_key_layout="MBHK",
                 past_value=past_value, past_value_layout="MBHK",
                 key=key_layer, key_layout="MBHK",
-                value=value_layer, value_layout="MBHK"
+                value=mixed_raw_layer, value_layout="MB(H3K)"
             )
-
-        # seqlen, batch, num_attention_heads, hidden_size_per_attention_head
-        seq_len, b, nh, hidden_size = key_layer.shape
+        else:
+            # for use_cache && past_value
+            value_layer = mixed_raw_layer.view(*mixed_raw_layer.shape[:2], -1, 3, k)[:, :, :, 2, :]
 
         if use_cache:
             present = (key_layer, value_layer)
@@ -340,7 +323,7 @@ class SelfAttention(torch.nn.Module):
             query = query_layer, query_layout = "MBHK",
             key = key_layer, key_layout = "MBHK",
             value = value_layer, value_layout = "MBHK",
-            scale = 1 / math.sqrt(hidden_size),
+            scale = 1 / math.sqrt(k),
             attn_bias = attention_bias,
             output_layout = "MB(HK)",
         )

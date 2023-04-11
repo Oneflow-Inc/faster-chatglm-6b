@@ -5,7 +5,9 @@ import os
 import platform
 from transformers import AutoTokenizer, AutoModel
 
-tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    "THUDM/chatglm-6b", trust_remote_code=True, revision=faster_chatglm_6b.revision
+)
 model = (
     AutoModel.from_pretrained(
         "THUDM/chatglm-6b", trust_remote_code=True, revision=faster_chatglm_6b.revision

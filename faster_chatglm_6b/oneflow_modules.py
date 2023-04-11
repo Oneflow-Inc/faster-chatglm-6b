@@ -726,6 +726,9 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
 
     def __init__(self, config: ChatGLMConfig):
         super().__init__(config)
+        assert config.pre_seq_len is None, "Please set pre_seq_len to `None`, Not yet supporting non-None values"
+        assert config.prefix_projection == False, "Please set prefix_projection to `True`, Not yet supporting True"
+
 
         # recording parameters
         self.max_sequence_length = config.max_sequence_length

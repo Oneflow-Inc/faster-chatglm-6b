@@ -48,7 +48,7 @@ class InvalidScoreLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if torch.isnan(scores).any() or torch.isinf(scores).any():
             scores.zero_()
-            scores[..., 20005] = 5e4
+            scores[..., 5] = 5e4
         return scores
 
 
@@ -859,9 +859,9 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
 
 
             if position_ids is None:
-                MASK, gMASK = 150000, 150001
-                mask_token = MASK if MASK in input_ids else gMASK
-                use_gmask = False if MASK in input_ids else True
+                MASK, gMASK = self.config.mask_token_id, self.config.gmask_token_id
+                mask_token = gMASK if gMASK in input_ids else MASK
+                use_gmask = True if gMASK in input_ids else False
 
                 mask_positions = [seq.tolist().index(mask_token) for seq in input_ids]
                 position_ids = self.get_position_ids(

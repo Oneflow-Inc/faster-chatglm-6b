@@ -2,7 +2,7 @@ import os
 os.environ["ONEFLOW_LINEAR_EMBEDDING_SKIP_INIT"] = "1"
 os.environ["ONEFLOW_KERNEL_ENABLE_FUSED_LINEAR"] = "1"
 
-revision = "551a50efec3acc5a9b94de8ec46d33d0f81919f7"
+revision = "aa51e62ddc9c9f334858b0af44cf59b05c70148a"
 
 import oneflow as flow
 from oneflow import nn

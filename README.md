@@ -1,6 +1,10 @@
 # faster-chatglm-6b
-![demo](images/demo.gif)
+
 `faster-chatglm-6b` 是一个使用 [OneFlow](https://github.com/Oneflow-Inc/oneflow) 深度学习框架为后端加速[THUDM/chatglm-6b](https://huggingface.co/THUDM/chatglm-6b)运行的项目。
+
+![demo](images/demo.gif)
+
+注：上图为加速效果展示，左侧为 OneFlow ，硬件为 NVIDIA A100 40G
 
 ## 软件依赖
 

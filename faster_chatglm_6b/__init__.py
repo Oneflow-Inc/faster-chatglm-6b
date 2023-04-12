@@ -10,6 +10,9 @@ from oneflow import nn
 
 flow.mock_torch.enable(lazy=True)
 
+with flow.mock_torch.disable():
+    import torch
+
 def new_skip_init(module_cls, *args, **kwargs):
     return module_cls(*args, **kwargs)
 

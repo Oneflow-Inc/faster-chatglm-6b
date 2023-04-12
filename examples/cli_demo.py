@@ -4,6 +4,7 @@ import faster_chatglm_6b
 import os
 import platform
 import signal
+
 from transformers import AutoTokenizer, AutoModel
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -61,10 +62,10 @@ def main():
                     os.system(clear_command)
                     print(build_prompt(history), flush=True)
                     signal.signal(signal.SIGINT, signal_handler)
+
         os.system(clear_command)
         print(build_prompt(history), flush=True)
 
 
 if __name__ == "__main__":
     main()
-

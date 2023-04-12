@@ -8,7 +8,7 @@ def read_file(file_path):
 
 setup(
     name="faster-chatglm-6b",
-    version="0.0.0",
+    version="0.0.1",
     description="faster-chatglm-6b is a project that uses the OneFlow as the backend to accelerate THUDM/chatglm-6b.",
     long_description=read_file("README.md"),
     long_description_content_type="text/markdown",

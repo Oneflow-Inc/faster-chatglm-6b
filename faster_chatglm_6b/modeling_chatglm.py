@@ -1288,19 +1288,7 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
             yield input_ids
 
     def quantize(self, bits: int, empty_init=False, **kwargs):
-        if bits == 0:
-            return
-
         from .quantization import quantize
-
-        if self.quantized:
-            logger.info("Already quantized.")
-            return self
-
-        self.quantized = True
-
-        self.config.quantization_bit = bits
-
-        self.transformer = quantize(self.transformer, bits, empty_init=empty_init, **kwargs)
+        self.transformer = quantize(self.transformer, bits)
         return self
 

@@ -25,6 +25,7 @@ def benchmark(model_name, prompt, warmup_iters, iters, new_tokens, fast, quant):
             model_name, trust_remote_code=True, use_fast=False
         )
         model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+        model.eval()
         if quant:
             model.quantize(bits=8)
         model.half().cuda()

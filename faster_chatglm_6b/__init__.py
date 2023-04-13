@@ -20,11 +20,6 @@ def new_skip_init(module_cls, *args, **kwargs):
 if not hasattr(nn.utils, "skip_init"):
     nn.utils.skip_init = new_skip_init
 
-def _tensor_data_ptr(self):
-    return id(self)
-
-if not hasattr(flow.Tensor, "data_ptr"):
-    flow.Tensor.data_ptr = _tensor_data_ptr
 
 from transformers import dynamic_module_utils
 orig_get_class_from_dynamic_module = dynamic_module_utils.get_class_from_dynamic_module

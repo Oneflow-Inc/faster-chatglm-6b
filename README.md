@@ -91,7 +91,7 @@ ChatGLM中，每一个GLMBlock层的SelfAttention模块，都需要对张量quer
 
 - fused_fast_gelu_mul
 
-我们将`x1 * F.gelu(x2)`的操作融合成`fused_fast_gelu_mul`算子
+我们将`x1 * F.gelu(x2)`的操作融合成`fused_fast_gelu_mul`算子。
 
 - fused_matmul_bias
 

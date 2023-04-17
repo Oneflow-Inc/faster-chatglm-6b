@@ -101,30 +101,14 @@ ChatGLM中，每一个GLMBlock层的SelfAttention模块，都需要对张量quer
 
 我们对优化后的效果进行了定量的测试，测试脚本请参考：examples/benchmark.py。
 
-测试在NVIDIA A100 40G中进行，一共测试了4组参数，每组参数都运行了5次，测试结果如下：
+测试在NVIDIA A100 80G中进行，一共测试了4组参数，测试结果如下：
 
 | Backend | Quantization | Duration(s) | average  |
 | ------- | ------------ | ----------- | -------- |
-| OneFlow | Disable      | 30.58       | 1.53s/it |
-| OneFlow | Disable      | 30.96       | 1.55s/it |
-| OneFlow | Disable      | 30.52       | 1.53s/it |
-| OneFlow | Disable      | 31.13       | 1.56s/it |
-| OneFlow | Disable      | 30.71       | 1.54s/it |
-| OneFlow | Enable       | 33.30       | 1.66s/it |
-| OneFlow | Enable       | 33.68       | 1.68s/it |
-| OneFlow | Enable       | 26.06       | 1.30s/it |
-| OneFlow | Enable       | 33.77       | 1.69s/it |
-| OneFlow | Enable       | 29.30       | 1.46s/it |
-| Torch   | Disable      | 110.65      | 5.53s/it |
-| Torch   | Disable      | 112.23      | 5.61s/it |
-| Torch   | Disable      | 135.04      | 6.75s/it |
-| Torch   | Disable      | 109.02      | 5.45s/it |
-| Torch   | Disable      | 114.88      | 5.74s/it |
-| Torch   | Enable       | 161.77      | 8.09s/it |
-| Torch   | Enable       | 162.93      | 8.15s/it |
-| Torch   | Enable       | 185.70      | 9.29s/it |
-| Torch   | Enable       | 159.99      | 8.00s/it |
-| Torch   | Enable       | 161.69      | 8.08s/it |
+| OneFlow | Disable      | 25.674      | 1.28s/it |
+| OneFlow | Enable       | 23.131      | 1.16s/it |
+| Torch   | Disable      | 79.248      | 3.97s/it |
+| Torch   | Enable       | 138.447     | 6.92s/it |
 
 ## FAQ
 

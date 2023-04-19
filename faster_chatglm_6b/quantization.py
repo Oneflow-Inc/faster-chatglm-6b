@@ -3,7 +3,7 @@ from torch.nn import Linear
 from torch.nn.parameter import Parameter
 
 import torch
-
+import os
 
 import numpy as np
 
@@ -24,16 +24,30 @@ class QuantizedLinear(Linear):
         shape = self.weight.shape
         del self.weight
 
+        use_uint8 = os.environ.get("ONEFLOW_CHATGLM_USE_UINT8", "1") == "1"
+
         if weight_tensor is None:
             self.weight = torch.empty(
                 shape[0], shape[1] * weight_bit_width // 8, dtype=torch.int8, device=kwargs["device"]
             )
             self.weight_scale = torch.empty(shape[0], dtype=kwargs["params_dtype"], device=kwargs["device"])
         else:
-            self.weight_scale = (weight_tensor.abs().float().max(dim=-1, keepdim=True).values / ((2 ** (weight_bit_width - 1)) - 1)).half()
-            self.weight = torch.round(weight_tensor / self.weight_scale).to(torch.int8)
-            if weight_bit_width == 4:
-                self.weight = _pack_int8_to_int4(self.weight)
+            if use_uint8:
+                self.symmetric = False
+                min_values = weight_tensor.float().min(dim=-1, keepdim=True).values
+                max_values = weight_tensor.float().max(dim=-1, keepdim=True).values
+                self.weight_scale = ((max_values - min_values) / float(2 ** weight_bit_width - 1)).half()
+                self.weight = torch.round((weight_tensor - min_values) / self.weight_scale).to(torch.uint8)
+                self.weight_zero = min_values.half()
+                if weight_bit_width == 4:
+                    self.weight = _pack_int8_to_int4(self.weight)
+            else:
+                self.symmetric = True
+                self.weight_scale = (weight_tensor.abs().float().max(dim=-1, keepdim=True).values / ((2 ** (weight_bit_width - 1)) - 1)).half()
+                self.weight = torch.round(weight_tensor / self.weight_scale).to(torch.int8)
+                self.weight_zero = None
+                if weight_bit_width == 4:
+                    self.weight = _pack_int8_to_int4(self.weight)
 
         self.weight = Parameter(self.weight.to(kwargs["device"]), requires_grad=False)
         self.weight_scale = Parameter(self.weight_scale.to(kwargs["device"]), requires_grad=False)
@@ -41,8 +55,8 @@ class QuantizedLinear(Linear):
 
     def forward(self, input):
         output = torch._C.fused_linear_with_groupwise_quantized_weight(
-            input, self.weight, self.weight_scale, w_zero=None,
-            b=self.bias, num_bits=self.weight_bit_width, symmetric=True,
+            input, self.weight, self.weight_scale, w_zero=self.weight_zero,
+            b=self.bias, num_bits=self.weight_bit_width, symmetric=self.symmetric,
             group_dim=-1, group_size=-1
         )
         return output
